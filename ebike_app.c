@@ -516,11 +516,12 @@ static void ebike_control_motor (void)
 
     if (!brake_is_set ())
     {
-      // motor_set_pwm_duty_cycle_target (128);
+      // motor_set_pwm_duty_cycle_target (PWM_DUTY_CYCLE_MIN);
       motor_set_pwm_duty_cycle_target (walk_assist_wheel_speed_pi_controller_state.ui8_controller_output_value);
     }
     else
     {
+      motor_set_pwm_duty_cycle_target (0);
       pi_controller_reset (&walk_assist_wheel_speed_pi_controller_state);
     }
   }
