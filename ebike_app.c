@@ -315,10 +315,10 @@ void communications_controller (void)
       // assist level
       configuration_variables.ui8_power_regular_state_div25 = ui8_rx_buffer [1];
       // head light
-      configuration_variables.ui8_lights = (ui8_rx_buffer [2] & (1 << 0)) ? 1: 0;
+      configuration_variables.ui8_lights = ValBit(ui8_rx_buffer [2], 0);
       lights_set_state (configuration_variables.ui8_lights);
       // walk assist
-      configuration_variables.ui8_walk_assist = (ui8_rx_buffer [2] & (1 << 1)) ? 1: 0;
+      configuration_variables.ui8_walk_assist = ValBit(ui8_rx_buffer [2], 1);
       // battery max current
       configuration_variables.ui8_battery_max_current = ui8_rx_buffer [3];
       ebike_app_set_battery_max_current (configuration_variables.ui8_battery_max_current);
@@ -678,6 +678,13 @@ static void ebike_control_motor (void)
     configuration_variables.ui8_temperature_current_limiting_value = 255;
   }
   // ***********************************************************************************
+
+  // walk assist
+  if (configuration_variables.ui8_walk_assist == 1)
+  {
+    // ui8_adc_battery_target_current = 1;
+    // ui8_startup_enable = 1;
+  }
 
   // finally set the target battery current to the current controller
   ebike_app_set_target_adc_battery_max_current (ui8_adc_battery_target_current);
