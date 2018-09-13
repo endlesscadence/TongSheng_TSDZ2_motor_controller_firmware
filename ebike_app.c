@@ -285,10 +285,10 @@ void ebike_app_init (void)
   eeprom_init_variables ();
   ebike_app_set_battery_max_current (ADC_BATTERY_CURRENT_MAX);
 
-  walk_assist_wheel_speed_pi_controller_state.ui8_kp_dividend = WHEEL_SPEED_PI_CONTROLLER_KP_DIVIDEND;
-  walk_assist_wheel_speed_pi_controller_state.ui8_kp_divisor = WHEEL_SPEED_PI_CONTROLLER_KP_DIVISOR;
-  walk_assist_wheel_speed_pi_controller_state.ui8_ki_dividend = WHEEL_SPEED_PI_CONTROLLER_KI_DIVIDEND;
-  walk_assist_wheel_speed_pi_controller_state.ui8_ki_divisor = WHEEL_SPEED_PI_CONTROLLER_KI_DIVISOR;
+  walk_assist_wheel_speed_pi_controller_state.ui8_kp_dividend = WALK_ASSIST_WHEEL_SPEED_PI_CONTROLLER_KP_DIVIDEND;
+  walk_assist_wheel_speed_pi_controller_state.ui8_kp_divisor = WALK_ASSIST_WHEEL_SPEED_PI_CONTROLLER_KP_DIVISOR;
+  walk_assist_wheel_speed_pi_controller_state.ui8_ki_dividend = WALK_ASSIST_WHEEL_SPEED_PI_CONTROLLER_KI_DIVIDEND;
+  walk_assist_wheel_speed_pi_controller_state.ui8_ki_divisor = WALK_ASSIST_WHEEL_SPEED_PI_CONTROLLER_KI_DIVISOR;
   walk_assist_wheel_speed_pi_controller_state.i16_i_term = 0;
 }
 
@@ -323,10 +323,10 @@ void communications_controller (void)
       // assist level
       configuration_variables.ui8_power_regular_state_div25 = ui8_rx_buffer [1];
       // head light
-      configuration_variables.ui8_lights = ValBit(ui8_rx_buffer [2], 0);
+      configuration_variables.ui8_lights = ValBit(ui8_rx_buffer [2], 0) ? 1 : 0;
       lights_set_state (configuration_variables.ui8_lights);
       // walk assist
-      configuration_variables.ui8_walk_assist = ValBit(ui8_rx_buffer [2], 1);
+      configuration_variables.ui8_walk_assist = ValBit(ui8_rx_buffer [2], 1) ? 1 : 0;
       // battery max current
       configuration_variables.ui8_battery_max_current = ui8_rx_buffer [3];
       ebike_app_set_battery_max_current (configuration_variables.ui8_battery_max_current);
@@ -505,227 +505,221 @@ static void ebike_control_motor (void)
   uint8_t ui8_boost_enable;
   uint32_t ui32_temp;
 
-  // walk assist
-  if (configuration_variables.ui8_walk_assist == 1)
+  // calc battery voltage
+  ui16_battery_voltage_filtered = (uint16_t) motor_get_adc_battery_voltage_filtered_10b () * ADC10BITS_BATTERY_VOLTAGE_PER_ADC_STEP_X512;
+  ui16_battery_voltage_filtered = ui16_battery_voltage_filtered >> 9;
+
+  // calc max battery current for boost state
+  // calc max battery current for regular state
+  // calc max battery current (defined by user on LCD3)
+  ui32_adc_max_battery_current_boost_state_x4 = 0;
+  ui32_adc_max_battery_current_regular_state_x4 = 0;
+  if (ui16_battery_voltage_filtered > 15)
   {
-    walk_assist_wheel_speed_pi_controller_state.ui8_current_value = (uint8_t) ui16_wheel_speed_x10;
-    walk_assist_wheel_speed_pi_controller_state.ui8_target_value = 6 * 10;
-    pi_controller (&walk_assist_wheel_speed_pi_controller_state);
-
-    ebike_app_set_target_adc_battery_max_current (ui8_adc_battery_current_max);
-
-    if (!brake_is_set ())
+    // 1.6 = 1 / 0.625 (each adc step for current)
+    // 25 * 1.6 = 40
+    // 40 * 4 = 160
+    if (configuration_variables.ui8_startup_motor_power_boost_div25 > 0)
     {
-      // motor_set_pwm_duty_cycle_target (PWM_DUTY_CYCLE_MIN);
-      motor_set_pwm_duty_cycle_target (walk_assist_wheel_speed_pi_controller_state.ui8_controller_output_value);
+      ui32_adc_max_battery_current_boost_state_x4 = (((uint32_t) configuration_variables.ui8_startup_motor_power_boost_div25) * 160) / ((uint32_t) ui16_battery_voltage_filtered);
+    }
+
+    if (configuration_variables.ui8_power_regular_state_div25 > 0)
+    {
+      ui32_adc_max_battery_current_regular_state_x4 = (((uint32_t) configuration_variables.ui8_power_regular_state_div25) * 160) / ((uint32_t) ui16_battery_voltage_filtered);
+    }
+
+    if (configuration_variables.ui8_target_battery_max_power_div25 > 0)
+    {
+      ui32_adc_max_battery_current_x4 = (((uint32_t) configuration_variables.ui8_target_battery_max_power_div25) * 160) / ((uint32_t) ui16_battery_voltage_filtered);
+      ui8_adc_max_battery_current = ui32_adc_max_battery_current_x4 >> 2;
+    }
+  }
+
+  // start with disabled
+  ui8_startup_enable = 0;
+  // start when we press the pedals
+  if ((configuration_variables.ui8_power_regular_state_div25 && ui8_torque_sensor)) { ui8_startup_enable = 1; }
+
+  _ui8_pas_cadence_rpm = ui8_pas_cadence_rpm;
+  if (configuration_variables.ui8_motor_assistance_startup_without_pedal_rotation)
+  {
+    if (ui8_pas_cadence_rpm < 10) { _ui8_pas_cadence_rpm = 10; }
+  }
+  else
+  {
+    if (ui8_pas_cadence_rpm < 10) { _ui8_pas_cadence_rpm = 0; }
+  }
+
+  // startup boost state machine
+  startup_boost ();
+
+  if (ui8_startup_boost_enable &&
+      configuration_variables.ui8_power_regular_state_div25 &&
+      (_ui8_pas_cadence_rpm > 0))
+  {
+    ui8_boost_enable = 1;
+  }
+  else
+  {
+    ui8_boost_enable = 0;
+  }
+
+  if (ui8_boost_enable)
+  {
+    ui32_temp = map ((uint32_t) ui8_torque_sensor,
+          (uint32_t) 0,
+          (uint32_t) 255,
+          (uint32_t) 0,
+          (uint32_t) ui32_adc_max_battery_current_boost_state_x4);
+    ui32_temp >>= 2;
+    if (ui32_temp > 255) { ui8_adc_battery_target_current = 255; }
+    else { ui8_adc_battery_target_current = (uint8_t) ui32_temp; }
+  }
+  else
+  {
+    // cadence percentage (in x256)
+    ui16_temp = (uint16_t) (map (((uint32_t) _ui8_pas_cadence_rpm),
+          (uint32_t) 0,
+          (uint32_t) configuration_variables.ui8_pas_max_cadence,
+          (uint32_t) 0,
+          (uint32_t) 255));
+
+    // human power: pedal torque * pedal cadence
+    ui8_pedal_human_power = ((((uint16_t) ui8_torque_sensor) * ui16_temp) >> 8);
+
+    ui32_temp = map ((uint32_t) ui8_pedal_human_power,
+          (uint32_t) 0,
+          (uint32_t) 254, // 254 because max of (255 * 255) >> 8 is 254
+          (uint32_t) 0,
+          (uint32_t) ui32_adc_max_battery_current_regular_state_x4);
+    ui32_temp >>= 2;
+    if (ui32_temp > 255) { ui8_adc_battery_target_current = 255; }
+    else { ui8_adc_battery_target_current = (uint8_t) ui32_temp; }
+  }
+
+  // ***********************************************************************************
+  // make transition from boost to regular level
+  //
+  if (ui8_startup_boost_fade_enable)
+  {
+    // here we try to converge to the regular value, ramping down or up step by step
+    ui16_adc_battery_target_current_x256 = ((uint16_t) ui8_adc_battery_target_current) << 8;
+    if (ui16_startup_boost_fade_variable_x256 > ui16_adc_battery_target_current_x256)
+    {
+      ui16_startup_boost_fade_variable_x256 -= ui16_startup_boost_fade_variable_step_amount_x256;
+    }
+    else if (ui16_startup_boost_fade_variable_x256 < ui16_adc_battery_target_current_x256)
+    {
+      ui16_startup_boost_fade_variable_x256 += ui16_startup_boost_fade_variable_step_amount_x256;
+    }
+
+    ui8_adc_battery_target_current = (uint8_t) (ui16_startup_boost_fade_variable_x256 >> 8);
+  }
+  // ***********************************************************************************
+
+  // ***********************************************************************************
+  // throttle: if throttle has higher value, then use it!
+  //
+  ui8_temp = (uint8_t) (map ((uint32_t) ui8_throttle,
+        (uint32_t) 0,
+        (uint32_t) 255,
+        (uint32_t) 0,
+        (uint32_t) ui8_adc_battery_current_max));
+  ui8_adc_battery_target_current = ui8_max (ui8_adc_battery_target_current, ui8_temp);
+  // ***********************************************************************************
+
+  // ***********************************************************************************
+  // speed limit
+  //
+  ui8_adc_battery_target_current = (uint8_t) (map ((uint32_t) ui16_wheel_speed_x10,
+        (uint32_t) ((configuration_variables.ui8_wheel_max_speed * 10) - 20),
+        (uint32_t) ((configuration_variables.ui8_wheel_max_speed * 10) + 20),
+        (uint32_t) ui8_adc_battery_target_current,
+        (uint32_t) 0));
+  // ***********************************************************************************
+
+  // ***********************************************************************************
+  // limit the current to max value defined by user on LCD max power, if:
+  // - user defined to make that limitation
+  // - we are not on boost or fade state
+  if ((configuration_variables.ui8_startup_motor_power_boost_limit_to_max_power == 1) ||
+      (!((ui8_boost_enable == 1) || (ui8_startup_boost_fade_enable == 1))))
+  {
+    // now let's limit the target battery current to battery max current (use min value of both)
+    ui8_adc_battery_target_current = ui8_min (ui8_adc_battery_target_current, ui8_adc_max_battery_current);
+  }
+  // ***********************************************************************************
+
+  // ***********************************************************************************
+  // reduce battery current if motor over temperature
+  //
+  if (configuration_variables.ui8_throttle_adc_measures_motor_temperature &&
+      configuration_variables.ui8_motor_over_temperature_limit_current)
+  {
+    // min temperature value can't be equal or higher than max temperature value...
+    if (configuration_variables.ui8_motor_temperature_min_value_to_limit >= configuration_variables.ui8_motor_temperature_max_value_to_limit)
+    {
+      ui8_adc_battery_target_current = 0;
+      configuration_variables.ui8_temperature_current_limiting_value = 0;
     }
     else
     {
-      motor_set_pwm_duty_cycle_target (0);
-      pi_controller_reset (&walk_assist_wheel_speed_pi_controller_state);
+      // reduce motor current if over temperature
+      ui8_adc_battery_target_current = (uint8_t) (map ((uint32_t) configuration_variables.ui16_motor_temperature_x2,
+            (uint32_t) (((uint16_t) configuration_variables.ui8_motor_temperature_min_value_to_limit) << 1),
+            (uint32_t) (((uint16_t) configuration_variables.ui8_motor_temperature_max_value_to_limit) << 1),
+            (uint32_t) ui8_adc_battery_target_current,
+            (uint32_t) 0));
+
+      // get a value linear to the current limitation, just to show to user
+      configuration_variables.ui8_temperature_current_limiting_value = (uint8_t) (map ((uint32_t) configuration_variables.ui16_motor_temperature_x2,
+            (uint32_t) (((uint16_t) configuration_variables.ui8_motor_temperature_min_value_to_limit) << 1),
+            (uint32_t) (((uint16_t) configuration_variables.ui8_motor_temperature_max_value_to_limit) << 1),
+            (uint32_t) 255,
+            (uint32_t) 0));
     }
   }
   else
   {
-    // calc battery voltage
-    ui16_battery_voltage_filtered = (uint16_t) motor_get_adc_battery_voltage_filtered_10b () * ADC10BITS_BATTERY_VOLTAGE_PER_ADC_STEP_X512;
-    ui16_battery_voltage_filtered = ui16_battery_voltage_filtered >> 9;
+    // keep ui8_temperature_current_limiting_value = 255 because 255 means no current limiting happening
+    configuration_variables.ui8_temperature_current_limiting_value = 255;
+  }
+  // ***********************************************************************************
 
-    // calc max battery current for boost state
-    // calc max battery current for regular state
-    // calc max battery current (defined by user on LCD3)
-    ui32_adc_max_battery_current_boost_state_x4 = 0;
-    ui32_adc_max_battery_current_regular_state_x4 = 0;
-    if (ui16_battery_voltage_filtered > 15)
-    {
-      // 1.6 = 1 / 0.625 (each adc step for current)
-      // 25 * 1.6 = 40
-      // 40 * 4 = 160
-      if (configuration_variables.ui8_startup_motor_power_boost_div25 > 0)
-      {
-        ui32_adc_max_battery_current_boost_state_x4 = (((uint32_t) configuration_variables.ui8_startup_motor_power_boost_div25) * 160) / ((uint32_t) ui16_battery_voltage_filtered);
-      }
+  // walk assist
+  if (configuration_variables.ui8_walk_assist)
+  {
+    walk_assist_wheel_speed_pi_controller_state.ui16_current_value = ui16_wheel_speed_x10;
+    walk_assist_wheel_speed_pi_controller_state.ui16_target_value = 6 * 10;
+    pi_controller (&walk_assist_wheel_speed_pi_controller_state);
 
-      if (configuration_variables.ui8_power_regular_state_div25 > 0)
-      {
-        ui32_adc_max_battery_current_regular_state_x4 = (((uint32_t) configuration_variables.ui8_power_regular_state_div25) * 160) / ((uint32_t) ui16_battery_voltage_filtered);
-      }
-
-      if (configuration_variables.ui8_target_battery_max_power_div25 > 0)
-      {
-        ui32_adc_max_battery_current_x4 = (((uint32_t) configuration_variables.ui8_target_battery_max_power_div25) * 160) / ((uint32_t) ui16_battery_voltage_filtered);
-        ui8_adc_max_battery_current = ui32_adc_max_battery_current_x4 >> 2;
-      }
-    }
-
-    // start with disabled
-    ui8_startup_enable = 0;
-    // start when we press the pedals
-    if ((configuration_variables.ui8_power_regular_state_div25 && ui8_torque_sensor)) { ui8_startup_enable = 1; }
-
-    _ui8_pas_cadence_rpm = ui8_pas_cadence_rpm;
-    if (configuration_variables.ui8_motor_assistance_startup_without_pedal_rotation)
-    {
-      if (ui8_pas_cadence_rpm < 10) { _ui8_pas_cadence_rpm = 10; }
-    }
-    else
-    {
-      if (ui8_pas_cadence_rpm < 10) { _ui8_pas_cadence_rpm = 0; }
-    }
-
-    // startup boost state machine
-    startup_boost ();
-
-    if (ui8_startup_boost_enable &&
-        configuration_variables.ui8_power_regular_state_div25 &&
-        (_ui8_pas_cadence_rpm > 0))
-    {
-      ui8_boost_enable = 1;
-    }
-    else
-    {
-      ui8_boost_enable = 0;
-    }
-
-    if (ui8_boost_enable)
-    {
-      ui32_temp = map ((uint32_t) ui8_torque_sensor,
-            (uint32_t) 0,
-            (uint32_t) 255,
-            (uint32_t) 0,
-            (uint32_t) ui32_adc_max_battery_current_boost_state_x4);
-      ui32_temp >>= 2;
-      if (ui32_temp > 255) { ui8_adc_battery_target_current = 255; }
-      else { ui8_adc_battery_target_current = (uint8_t) ui32_temp; }
-    }
-    else
-    {
-      // cadence percentage (in x256)
-      ui16_temp = (uint16_t) (map (((uint32_t) _ui8_pas_cadence_rpm),
-            (uint32_t) 0,
-            (uint32_t) configuration_variables.ui8_pas_max_cadence,
-            (uint32_t) 0,
-            (uint32_t) 255));
-
-      // human power: pedal torque * pedal cadence
-      ui8_pedal_human_power = ((((uint16_t) ui8_torque_sensor) * ui16_temp) >> 8);
-
-      ui32_temp = map ((uint32_t) ui8_pedal_human_power,
-            (uint32_t) 0,
-            (uint32_t) 254, // 254 because max of (255 * 255) >> 8 is 254
-            (uint32_t) 0,
-            (uint32_t) ui32_adc_max_battery_current_regular_state_x4);
-      ui32_temp >>= 2;
-      if (ui32_temp > 255) { ui8_adc_battery_target_current = 255; }
-      else { ui8_adc_battery_target_current = (uint8_t) ui32_temp; }
-    }
-
-    // ***********************************************************************************
-    // make transition from boost to regular level
-    //
-    if (ui8_startup_boost_fade_enable)
-    {
-      // here we try to converge to the regular value, ramping down or up step by step
-      ui16_adc_battery_target_current_x256 = ((uint16_t) ui8_adc_battery_target_current) << 8;
-      if (ui16_startup_boost_fade_variable_x256 > ui16_adc_battery_target_current_x256)
-      {
-        ui16_startup_boost_fade_variable_x256 -= ui16_startup_boost_fade_variable_step_amount_x256;
-      }
-      else if (ui16_startup_boost_fade_variable_x256 < ui16_adc_battery_target_current_x256)
-      {
-        ui16_startup_boost_fade_variable_x256 += ui16_startup_boost_fade_variable_step_amount_x256;
-      }
-
-      ui8_adc_battery_target_current = (uint8_t) (ui16_startup_boost_fade_variable_x256 >> 8);
-    }
-    // ***********************************************************************************
-
-    // ***********************************************************************************
-    // throttle: if throttle has higher value, then use it!
-    //
-    ui8_temp = (uint8_t) (map ((uint32_t) ui8_throttle,
+    ui8_adc_battery_target_current = (uint8_t) (map ((uint32_t) walk_assist_wheel_speed_pi_controller_state.ui16_controller_output_value,
           (uint32_t) 0,
-          (uint32_t) 255,
+          (uint32_t) 1024,
           (uint32_t) 0,
           (uint32_t) ui8_adc_battery_current_max));
-    ui8_adc_battery_target_current = ui8_max (ui8_adc_battery_target_current, ui8_temp);
-    // ***********************************************************************************
+    
+    ui8_startup_enable = 1;
+  }
 
-    // ***********************************************************************************
-    // speed limit
-    //
-    ui8_adc_battery_target_current = (uint8_t) (map ((uint32_t) ui16_wheel_speed_x10,
-          (uint32_t) ((configuration_variables.ui8_wheel_max_speed * 10) - 20),
-          (uint32_t) ((configuration_variables.ui8_wheel_max_speed * 10) + 20),
-          (uint32_t) ui8_adc_battery_target_current,
-          (uint32_t) 0));
-    // ***********************************************************************************
+  // finally set the target battery current to the current controller
+  ebike_app_set_target_adc_battery_max_current (ui8_adc_battery_target_current);
 
-    // ***********************************************************************************
-    // limit the current to max value defined by user on LCD max power, if:
-    // - user defined to make that limitation
-    // - we are not on boost or fade state
-    if ((configuration_variables.ui8_startup_motor_power_boost_limit_to_max_power == 1) ||
-        (!((ui8_boost_enable == 1) || (ui8_startup_boost_fade_enable == 1))))
-    {
-      // now let's limit the target battery current to battery max current (use min value of both)
-      ui8_adc_battery_target_current = ui8_min (ui8_adc_battery_target_current, ui8_adc_max_battery_current);
-    }
-    // ***********************************************************************************
-
-    // ***********************************************************************************
-    // reduce battery current if motor over temperature
-    //
-    if (configuration_variables.ui8_throttle_adc_measures_motor_temperature &&
-        configuration_variables.ui8_motor_over_temperature_limit_current)
-    {
-      // min temperature value can't be equal or higher than max temperature value...
-      if (configuration_variables.ui8_motor_temperature_min_value_to_limit >= configuration_variables.ui8_motor_temperature_max_value_to_limit)
-      {
-        ui8_adc_battery_target_current = 0;
-        configuration_variables.ui8_temperature_current_limiting_value = 0;
-      }
-      else
-      {
-        // reduce motor current if over temperature
-        ui8_adc_battery_target_current = (uint8_t) (map ((uint32_t) configuration_variables.ui16_motor_temperature_x2,
-              (uint32_t) (((uint16_t) configuration_variables.ui8_motor_temperature_min_value_to_limit) << 1),
-              (uint32_t) (((uint16_t) configuration_variables.ui8_motor_temperature_max_value_to_limit) << 1),
-              (uint32_t) ui8_adc_battery_target_current,
-              (uint32_t) 0));
-
-        // get a value linear to the current limitation, just to show to user
-        configuration_variables.ui8_temperature_current_limiting_value = (uint8_t) (map ((uint32_t) configuration_variables.ui16_motor_temperature_x2,
-              (uint32_t) (((uint16_t) configuration_variables.ui8_motor_temperature_min_value_to_limit) << 1),
-              (uint32_t) (((uint16_t) configuration_variables.ui8_motor_temperature_max_value_to_limit) << 1),
-              (uint32_t) 255,
-              (uint32_t) 0));
-      }
-    }
-    else
-    {
-      // keep ui8_temperature_current_limiting_value = 255 because 255 means no current limiting happening
-      configuration_variables.ui8_temperature_current_limiting_value = 255;
-    }
-    // ***********************************************************************************
-
-    // finally set the target battery current to the current controller
-    ebike_app_set_target_adc_battery_max_current (ui8_adc_battery_target_current);
-
-    // set the target duty_cycle to max, as the battery current controller will manage it
-    // if battery_target_current == 0, put duty_cycle at 0
-    // if ui8_startup_enable == 0, put duty_cycle at 0
-    if (ui8_adc_battery_target_current &&
-        ui8_startup_enable &&
-        (!brake_is_set()))
-    {
-      motor_set_pwm_duty_cycle_target (255);
-    }
-    else
-    {
-      motor_set_pwm_duty_cycle_target (0);
-    }
-  }  
+  // set the target duty_cycle to max, as the battery current controller will manage it
+  // if battery_target_current == 0, put duty_cycle at 0
+  // if ui8_startup_enable == 0, put duty_cycle at 0
+  if (ui8_adc_battery_target_current &&
+      ui8_startup_enable &&
+      (!brake_is_set()))
+  {
+    motor_set_pwm_duty_cycle_target (255);
+  }
+  else
+  {
+    motor_set_pwm_duty_cycle_target (0);
+    pi_controller_reset (&walk_assist_wheel_speed_pi_controller_state);
+  }
 }
 
 // each 1 unit = 0.625 amps

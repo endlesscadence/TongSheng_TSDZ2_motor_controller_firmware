@@ -57,7 +57,7 @@ void pi_controller (struct_pi_controller_state *pi_controller)
   int16_t i16_p_term;
   int16_t i16_temp;
 
-  i16_error = pi_controller->ui8_target_value - pi_controller->ui8_current_value; // 255-0 or 0-255 --> [-255 ; 255]
+  i16_error = pi_controller->ui16_target_value - pi_controller->ui16_current_value; // 255-0 or 0-255 --> [-255 ; 255]
   i16_p_term = (i16_error * pi_controller->ui8_kp_dividend) >> pi_controller->ui8_kp_divisor;
 
   pi_controller->i16_i_term += (i16_error * pi_controller->ui8_ki_dividend) >> pi_controller->ui8_ki_divisor;
@@ -66,9 +66,26 @@ void pi_controller (struct_pi_controller_state *pi_controller)
 
   i16_temp = i16_p_term + pi_controller->i16_i_term;
   // limit to [0 ; 255] as duty_cycle that will be controlled can't have other values than that ones
-  if (i16_temp > 255) { i16_temp = 255; }
+  // if (i16_temp > 255) { i16_temp = 255; }
+  if (i16_temp > 1024) { i16_temp = 1024; }
   if (i16_temp < 0) { i16_temp = 0; }
-  pi_controller->ui8_controller_output_value = (uint8_t) i16_temp;
+  pi_controller->ui16_controller_output_value = i16_temp;
+
+  //example
+  //error = 60 - 0 = 60
+  //p = (60 * 100) / 8 = 750
+  //i += (60 * 40) / 12 = 200
+  //temp = 750 + 200 = 950
+
+  //error = 6
+  //p = (6 * 100) / 8 = 75
+  //i += (6 * 40) / 12 = 20
+
+
+  //error = 6 - 10 = -4
+  //p = (-4 * 100) / 8 = -50
+  //i += (-4 * 40) / 12 = -13,33
+
 }
 
 void pi_controller_reset (struct_pi_controller_state *pi_controller)
